@@ -1,0 +1,81 @@
+#!/bin/bash
+
+SEARCH_DIR="/var/www/html/temp/replace_trademarks"
+TRADEMARKS_FILE="/opt/replace_trademarks/trademarks_jp.txt"
+DATE=$(date +"%Y%m%d")
+LOG_DIR="/opt/replace_trademarks/log"
+LOG_FILE="$LOG_DIR/replace_log_$DATE.txt"
+
+mkdir -p "$LOG_DIR"
+export LANG=ja_JP.UTF-8
+export LC_ALL=ja_JP.UTF-8
+
+# ===== 商標語を長さ順に読み込み（配列） =====
+TRADEMARK_LIST=()
+while IFS= read -r LINE; do
+    [[ -z "$LINE" ]] && continue
+    TRADEMARK_LIST+=("$LINE")
+done < <(
+    perl -CSDA -ne 'chomp; print length($_), "\t", $_, "\n" if length($_) > 0' "$TRADEMARKS_FILE" \
+    | sort -rn \
+    | cut -f2-
+)
+
+# ===== ログ開始 =====
+echo "[$(date '+%Y-%m-%d %H:%M:%S')] --- 商標置換 開始 ---" >> "$LOG_FILE"
+
+# ===== 各対象ファイルに対して処理 =====
+find "$SEARCH_DIR" -type f \( -name "*.html" -o -name "*.php" \) | while read -r FILE; do
+    ORIGINAL_CONTENT=$(<"$FILE")
+    UPDATED_CONTENT="$ORIGINAL_CONTENT"
+    BACKED_UP=0
+    HAS_CHANGED=0
+    CHANGES_LOG=""
+    BACKUP_NAME=""
+    
+    TMP_PREFIX="__TM__"
+    TMP_SUFFIX="__"
+
+    # ===== ① 商標語を一時トークンに置換 =====
+    for KEYWORD in "${TRADEMARK_LIST[@]}"; do
+        [[ -z "$KEYWORD" ]] && continue
+        TOKEN="${TMP_PREFIX}${KEYWORD}${TMP_SUFFIX}"
+
+        # &reg; が未付与のものだけトークンに置換（\Q...\Eで特殊文字も対応）
+        NEW_CONTENT=$(printf "%s" "$UPDATED_CONTENT" | perl -pe "s/\Q${KEYWORD}\E(?!&reg;)/${TOKEN}/g")
+
+        [[ "$NEW_CONTENT" == "$UPDATED_CONTENT" ]] && continue
+
+        # 初回の変更でバックアップ作成
+        if [[ $BACKED_UP -eq 0 ]]; then
+            BASE_BACKUP="${FILE}.${DATE}.bak"
+            BACKUP_NAME="$BASE_BACKUP"
+            N=1
+            while [[ -e "$BACKUP_NAME" ]]; do
+                BACKUP_NAME="${FILE}.${DATE}_$N.bak"
+                N=$((N + 1))
+            done
+            cp "$FILE" "$BACKUP_NAME"
+            BACKED_UP=1
+        fi
+
+        UPDATED_CONTENT="$NEW_CONTENT"
+        HAS_CHANGED=1
+        CHANGES_LOG+="$KEYWORD → $TOKEN, "
+    done
+
+    # ===== ② 一時トークンを正規商標語（&reg;付き）に置換 =====
+    for KEYWORD in "${TRADEMARK_LIST[@]}"; do
+        TOKEN="${TMP_PREFIX}${KEYWORD}${TMP_SUFFIX}"
+        UPDATED_CONTENT=$(printf "%s" "$UPDATED_CONTENT" | sed "s/${TOKEN}/${KEYWORD}&reg;/g")
+    done
+
+    # ===== ファイル書き込み・ログ =====
+    [[ $HAS_CHANGED -eq 0 ]] && continue
+
+    printf "%s" "$UPDATED_CONTENT" > "$FILE"
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] 置換: $FILE | $CHANGES_LOG→ backup: $BACKUP_NAME" >> "$LOG_FILE"
+done
+
+# ===== ログ終了 =====
+echo "[$(date '+%Y-%m-%d %H:%M:%S')] --- 商標置換 終了 ---" >> "$LOG_FILE"
