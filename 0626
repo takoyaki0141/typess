@@ -1,0 +1,36 @@
+php
+
+ファイル末尾の //TokenSet の直後あたり
+
+// エラーがある場合にフォームを優先表示するフラグ
+$isConfirmedTrainingList = false;
+if ($_SERVER["REQUEST_METHOD"] === "POST" && isset($_POST['btn_submit'])) {
+    if ($count_validation > 0 && $CATEGORY !== "2") {
+        $isConfirmedTrainingList = true;
+    }
+}
+
+
+js
+
+<head> タグの中、</head> の直前あたり（他の <script> タグより上）
+
+<script>
+  const isConfirmedTrainingList = <?= $isConfirmedTrainingList ? 'true' : 'false'; ?>;
+</script>
+
+
+html
+
+既存の window.onload = function(){...} の中
+
+window.onload = function(){
+    fnc.cateChange(document.getElementById("category_select"), true);
+
+    // 研修リストの確認後、エラーが出た場合は training_list に戻らず contents を表示
+    if (typeof isConfirmedTrainingList !== "undefined" && isConfirmedTrainingList) {
+        document.getElementById("training_list").style.display = "none";
+        document.getElementById("contents").style.display = "block";
+        window.scrollTo({ top: 0, behavior: 'smooth' });
+    }
+};
