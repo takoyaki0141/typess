@@ -1,0 +1,116 @@
+project/
+│
+├─ data/
+│   ├─ image/    ← 入力画像（.jpg/.png）
+│   └─ label/    ← YOLOラベル（.txt、5列）
+│
+├─ models/
+│   └─ signet.pth  ← ダウンロードした学習済みモデル（128次元）
+│
+├─ output/
+│   ├─ signature_vectors.npy  ← ベクトルDB（自動生成）
+│   └─ ...
+│
+├─ vectorize_and_search.py  ← ← このコード
+
+
+pip install numpy pillow torch torchvision scikit-learn git+https://github.com/luizgh/sigver.git
+
+
+
+import os
+import torch
+import numpy as np
+from PIL import Image
+from sigver.featurelearning.models import SigNet
+from sigver.utils.preprocessing import preprocess_signature
+from sklearn.metrics.pairwise import cosine_similarity
+
+def yolo_to_pixel(bbox, img_w, img_h):
+    _, cx, cy, w, h = bbox
+    cx *= img_w
+    cy *= img_h
+    w *= img_w
+    h *= img_h
+    x = int(cx - w / 2)
+    y = int(cy - h / 2)
+    return [int(x), int(y), int(w), int(h)]
+
+def extract_vectors(image_dir, label_dir, model_path, output_npy):
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    model = SigNet().to(device)
+    state = torch.load(model_path, map_location=device)
+    model.load_state_dict(state[0] if isinstance(state, tuple) else state)
+    model.eval()
+
+    vectors = []
+    image_files = sorted(os.listdir(image_dir))
+
+    for fname in image_files:
+        img_path = os.path.join(image_dir, fname)
+        label_path = os.path.join(label_dir, os.path.splitext(fname)[0] + '.txt')
+        if not os.path.exists(label_path):
+            continue
+
+        image = Image.open(img_path).convert('RGB')
+        img_w, img_h = image.size
+        with open(label_path, 'r') as f:
+            lines = f.readlines()
+
+        for line in lines:
+            parts = list(map(float, line.strip().split()))
+            x, y, w, h = yolo_to_pixel(parts, img_w, img_h)
+            cropped = image.crop((x, y, x + w, y + h))
+            arr = preprocess_signature(np.array(cropped), canvas_size=(150, 220), input_size=(150, 220))
+            tensor = torch.tensor(arr).unsqueeze(0).float().to(device)
+            with torch.no_grad():
+                vector = model(tensor).cpu().squeeze().numpy()
+            vectors.append(vector)
+
+    vectors = np.array(vectors)
+    np.save(output_npy, vectors)
+    print(f"✅ ベクトルDBを {output_npy} に保存（{len(vectors)}件）")
+
+def compare_new_image(image_path, bbox, model_path, db_npy):
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    model = SigNet().to(device)
+    state = torch.load(model_path, map_location=device)
+    model.load_state_dict(state[0] if isinstance(state, tuple) else state)
+    model.eval()
+
+    image = Image.open(image_path).convert('RGB')
+    img_w, img_h = image.size
+    x, y, w, h = yolo_to_pixel(bbox, img_w, img_h)
+    cropped = image.crop((x, y, x + w, y + h))
+    arr = preprocess_signature(np.array(cropped), canvas_size=(150, 220), input_size=(150, 220))
+    tensor = torch.tensor(arr).unsqueeze(0).float().to(device)
+
+    with torch.no_grad():
+        vector = model(tensor).cpu().squeeze().numpy()
+
+    db = np.load(db_npy)
+    similarities = cosine_similarity([vector], db)[0]
+    top_score = similarities.max()
+    top_index = similarities.argmax()
+    print(f"🔎 類似スコア: {top_score:.4f}（最も近いID: {top_index}）")
+    return top_score, top_index
+
+# ---- 実行例 ----
+if __name__ == "__main__":
+    extract_vectors(
+        image_dir='data/image',
+        label_dir='data/label',
+        model_path='models/signet.pth',
+        output_npy='output/signature_vectors.npy'
+    )
+
+    # 例：新しい署名画像を比較（bboxはYOLO形式で5要素）
+    # 画像サイズによって変更してください（例: 1280x720の場合）
+    dummy_bbox = [0, 0.5, 0.5, 0.3, 0.1]  # クラスID, cx, cy, w, h（0〜1）
+    compare_new_image(
+        image_path='data/image/some_new_image.jpg',
+        bbox=dummy_bbox,
+        model_path='models/signet.pth',
+        db_npy='output/signature_vectors.npy'
+    )
+
